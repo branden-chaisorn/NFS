@@ -1,0 +1,153 @@
+*Here is an example client that uses the functions in fs_client.h. This client is run with two arguments: (1) the name of the file server's computer, (2) the port on which the file server process is accepting connections from clients. Assume the file server was initialized with a user "user1" with password "password1").
+ 
+#include <iostream>
+#include <cstdlib>
+#include "fs_client.h"
+ 
+using namespace std;
+ 
+main(int argc, char *argv[])
+{
+    char *server;
+    int server_port;
+    int session, seq=0;
+    char buf[10];
+ 
+    if (argc != 3)
+    {
+        cout << "error: usage: " << argv[0] << "\n"; exit(1);
+    }
+ 
+    server = argv[1];
+    server_port = atoi(argv[2]);
+    fs_session("user1", "password1", server, server_port, &session);
+    fs_create("user1", "password1", session, seq++, "tmp");
+    fs_append("user1", "password1", session, seq++, "tmp", "abc", 3);
+    fs_read("user1", "password1", session, seq++, "tmp", 1, buf, 2);
+    fs_delete("user1", "password1", session, seq++, "tmp");
+}
+
+
+* Encryption
+All request and response messages between the client and file server will use encryption (secret-key encryption based on the user's password). The file server will be given a list of user and passwords when it is started. fs_param.h (automatically included in fs_client.h and fs_server.h) defines the maximum size of a username and password as FS_MAXUSERNAME and FS_MAXPASSWORD.
+
+Each request messages from the client will be encrypted using the password parameter that was passed to the client function. To enable the file server to decrypt the request message, the client will send a cleartext (i.e., un-encrypted) request header before sending the request message. The cleartext request header follows the following format (note the space between <username> and <size>):
+
+<username> <size><NULL>
+<username> is the name of the user that was passed to the client function. The file server uses this information to choose which password to use to decrypt the ensuing request message.
+<size> is the size of the encrypted message that follows this cleartext request header
+<NULL> is the ASCII character '\0' (terminating the string)
+When the file server receives a request, it will first decrypt the request using the information provided in the cleartext request header. There are some cases where the file server will not be able to decrypt the request. This can happen if <username> is not valid, or if the client uses the wrong password. The file server should handle these cases like other erroneous requests (by closing the connection without sending a response).
+
+Each response message from the file server will be encrypted using the user's password. To enable the client to receive and decrypt the response message, the file server will send a cleartext response header before sending the response message. The cleartext response header follows the following format:
+
+<size><NULL>
+<size> is the size of the encrypted message that follows this cleartext response header
+<NULL> is the ASCII character '\0' (terminating the string)
+
+
+*Communication protocol
+
+There are five types of requests that can be sent over the network from a client to the file server: FS_SESSION, FS_READ, FS_APPEND, FS_CREATE,
+FS_DELETE. Each client request causes the client library to open a connection to the server, send the request, wait for the response, then close the connection.
+The below section describes the format of each client request message and the server's response message. Note the exact spacing in the message formats; these must be *exactly* as specified. The quotes ("...") are not part of the message; they are only there for clarity.
+
+(1) FS_SESSION
+
+A client requests a new session with FS_SESSION (a user can call FS_SESSION any number of times). Client requests use a session and sequence number as a unique identifier for the request (a nonce) to thwart replay attacks. A user may only use session numbers that have been returned by that user's prior FS_SESSION requests. A session remains active for the lifetime of the file server.
+
+The first request in a session is the FS_SESSION that created the session, which uses the specified sequence number. Each subsequent sequence number for a session must be larger than all prior sequence numbers used by that session (they may increase by more than 1). A sequence number for a session gets "used" by any client request in that session, as long as the client request is made by the user that created that session. Erroneous requests use up sequence numbers just like correct requests (think about what attack could be executed otherwise), as long as the file server can decrypt and parse the session/sequence numbers from the request and the session is owned by that user.
+
+An FS_SESSION request message is a string of the following format:
+
+FS_SESSION <session> <sequence><NULL>
+<session> is 0. This field is unused for FS_SESSION requests. It's here just to make the formats of all request messages more uniform.
+<sequence> is the sequence number for this request
+<NULL> is the ASCII character '\0' (terminating the string)
+Upon receiving an FS_SESSION request, the file server should assign a number for the new session, which should be the smallest number that has not yet been assigned to a session. Session numbers are global across all users, and the first returned session number should be 0. The file server should then send the following response message:
+
+<session> <sequence><NULL>
+<session> is the new session number
+<sequence> is the sequence from the request message
+<NULL> is the ASCII character '\0' (terminating the string)
+
+(2) FS_READ
+
+A client reads an existing file by sending an FS_READ request to the file server.
+
+An FS_READ request message is a string of the following format:
+
+FS_READ <session> <sequence> <filename> <offset> <size><NULL>
+<session> is the session number for this request
+<sequence> is the sequence number for this request
+<filename> is the name of the file being read
+<offset> specifies the starting byte of the file portion being read
+<size> specifies the number of bytes to read from the file (should be > 0)
+<NULL> is the ASCII character '\0' (terminating the string)
+Upon receiving an FS_READ request, the file server should check the validity of its parameters. The server should also check that the file exists, is owned by <username>, and is large enough to satisfy the request. If the request is allowed, the file server should read the requested data from disk (in the order the bytes appear in the file) and return the data in the response message. The response message for a successful FS_READ follows the following format:
+
+<session> <sequence><NULL><data>
+<session> is the session number from the request message
+<sequence> is the sequence from the request message
+<NULL> is the ASCII character '\0' (terminating the string)
+<data> is the data that was read from the file. Note that <data> is outside of the response string (i.e., after <NULL>). The size of <data> should be the <size> from the request message.
+
+(3) FS_APPEND
+
+A client appends to an existing file by sending an FS_APPEND request to the file server.
+
+An FS_APPEND request message is a string of the following format:
+
+FS_APPEND <session> <sequence> <filename> <size><NULL><data>
+<session> is the session number for this request
+<sequence> is the sequence number for this request
+<filename> is the name of the file to which the data is being appended
+<size> specifies the number of bytes to append to the file (should be > 0)
+<NULL> is the ASCII character '\0' (terminating the string)
+<data> is that data to append to the file. Note that <data> is outside of the request string (i.e., after <NULL>). The size of <data> is given in <size>.
+Upon receiving an FS_APPEND request, the file server should check the validity of its parameters. The server should also check that the file exists, is owned by <username>, and that there is sufficient disk space to satisfy the request.
+
+If the request is allowed, the file server should append the data to the file (writing to disk in the order the bytes appear in the file). The response message for a successful FS_APPEND follows the following format:
+
+<session> <sequence><NULL>
+<session> is the session number from the request message
+<sequence> is the sequence from the request message
+<NULL> is the ASCII character '\0' (terminating the string)
+No data should be appended to the file for unsuccessful requests.
+
+(4) FS_CREATE
+
+A client creates a new file by sending an FS_CREATE request to the file server.
+
+An FS_CREATE request message is a string of the following format:
+
+FS_CREATE <session> <sequence> <filename><NULL>
+<session> is the session number for this request
+<sequence> is the sequence number for this request
+<filename> is the name of the file being created
+<NULL> is the ASCII character '\0' (terminating the string)
+Upon receiving an FS_CREATE request, the file server should check the validity of its parameters. The server should also check that the file does not yet exist and that there is sufficient disk space to create a new file. If the request is allowed, the file server should create the new file. The response message for a successful FS_CREATE follows the following format:
+
+<session> <sequence><NULL>
+<session> is the session number from the request message
+<sequence> is the sequence from the request message
+<NULL> is the ASCII character '\0' (terminating the string)
+
+(5) FS_DELETE
+
+A client deletes an existing file by sending an FS_DELETE request to the file server.
+
+An FS_DELETE request message is a string of the following format:
+
+FS_DELETE <session> <sequence> <filename><NULL>
+<session> is the session number for this request
+<sequence> is the sequence number for this request
+<filename> is the name of the file being deleted
+<NULL> is the ASCII character '\0' (terminating the string)
+Upon receiving an FS_DELETE request, the file server should check the validity of its parameters. The server should also check that the file exists and is owned by <username>. If the request is allowed, the file server should delete the file. The response message for a successful FS_DELETE follows the following format:
+
+<session> <sequence><NULL>
+<session> is the session number from the request message
+<sequence> is the sequence from the request message
+<NULL> is the ASCII character '\0' (terminating the string)
+
