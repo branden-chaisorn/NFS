@@ -9,7 +9,7 @@ using namespace std;
 
 
 
-fs_session(){
+fs_session(string user, string password, , ){
 
 }
 
